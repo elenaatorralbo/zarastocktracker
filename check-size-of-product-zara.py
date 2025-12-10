@@ -1,73 +1,132 @@
-from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service as ChromeService
-from webdriver_manager.chrome import ChromeDriverManager
-import winsound
-import os
+import asyncio
+from playwright.async_api import async_playwright, Error as PlaywrightError
+import smtplib
+from email.message import EmailMessage
 import time
 
-# Configuración de opciones de Chrome para que no muestre logs extraños
-options = webdriver.ChromeOptions()
-options.add_argument("--disable-background-timer-throttling")
-options.add_argument("--disable-features=PlatformMonitor")
-options.add_argument("--log-level=3")
-options.add_argument("--disable-logging")
+# ==============================================================================
+#                      I. CONFIGURACIÓN DEL PRODUCTO Y RASTREO
+# ==============================================================================
+PRODUCT_URL = "https://www.zara.com/es/es/jersey-punto-lazo-p03920940.html?v1=484707602"
+TALLA_BUSCADA = "xl"
+# SELECTOR DE TALLA: Búsqueda simple por texto.
+TALLA_SELECTOR = f'button:has-text("{TALLA_BUSCADA}")'
 
-# Inicialización del navegador
-driver = webdriver.Chrome(
-    service=ChromeService(os.path.join(os.path.dirname(ChromeDriverManager().install()), "chromedriver.exe")),
-    options=options
-)
+# SELECTOR DEL BOTÓN INICIAL ("Añadir")
+BUTTON_OPEN_SELECTOR = "xpath=//button[contains(translate(normalize-space(.), 'AÑADIR', 'añadir'), 'añadir')]"
 
-# Se escribe el link al artículo
-driver.get('https://www.zara.com/es/es/jersey-punto-lazo-p03920940.html?v1=484707602')
+# SELECTOR DE COOKIES
+COOKIES_SELECTOR = 'button:has-text("Aceptar")'
 
-# Se escribe la talla que se quiere
-talla_elegida = 's'
+TIMEOUT_MS = 20000
 
-# Se almacena el id de la talla
-id_talla = {'xs': 0, 's': 1, 'm': 2, 'l': 3, 'xl': 4, 'xxl': 5}
-num = id_talla.get(talla_elegida.lower(), "Entrada no válida")
-
-try:
-    while 1:
-        # El bloque de las tallas se ubica dentro de un elemento <ul> por lo tanto se busca que ese elemento contenga el id que se quiere
-        ul_element = driver.find_element(By.CSS_SELECTOR, 'ul.size-selector-sizes.size-selector-sizes--grid-gap')
-
-        # Se traen los bloques de elementos li que son los de las tallas
-        li_elements = ul_element.find_elements(By.TAG_NAME, 'li')
-
-        # Se guarda el elemento que corresponda a la talla seleccionada
-        talla = li_elements[num]
-
-        # Se guarda el atributo <class> que indica si está fuera de stock o no
-        class_name = talla.get_attribute('class')
-
-        # Si no aparece el texto out-of-stock significa que hay talla
-        if "unavailable" not in class_name:
-            for i in range(10):
-                # Imprime 10 veces el texto
-                print("TALLA " + talla_elegida.upper() + " DISPONIBLE")
-
-                time.sleep(2)
-                # Se reproducen 10 pitidos
-                winsound.PlaySound("SystemHand", winsound.SND_ALIAS)
-        else:
-            print("--- No hay talla disponible")
-            # Se duerme al proceso x segundos
-            time.sleep(20)
-
-        # Se actualiza la página
-        print("------- Actualizando web -------- \n")
-        driver.refresh()
+# ==============================================================================
+#                      II. CONFIGURACIÓN DE NOTIFICACIÓN (EMAIL)
+# ==============================================================================
+SENDER_EMAIL = "tu_email@gmail.com"
+APP_PASSWORD = "tu_contraseña_de_aplicación"
+RECEIVER_EMAIL = "email_destino@ejemplo.com"
 
 
-except NoSuchElementException as e:
-    print("No se encontró el elemento " + str(e))
+# ==============================================================================
 
-# except Exception as e:
-#   print("Error: " + str(e))
 
-# Cierra el navegador
-driver.quit()
+# ------------------------------------------------------------------------------
+#                           III. FUNCIONES PRINCIPALES
+# ------------------------------------------------------------------------------
+
+def send_email(subject, body):
+    """Envía un correo electrónico con codificación UTF-8 para aceptar la 'ñ' y tildes."""
+    try:
+        msg = EmailMessage()
+        msg.set_content(body, charset='utf-8')
+        msg['Subject'] = subject
+        msg['From'] = SENDER_EMAIL
+        msg['To'] = RECEIVER_EMAIL
+
+        print("   -> Enviando notificación por email...")
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(SENDER_EMAIL, APP_PASSWORD)
+            server.send_message(msg)
+            print("   -> Email enviado con éxito.")
+
+    except Exception as e:
+        print(f"   -> ERROR al enviar el email: {e}")
+
+
+async def check_zara_stock():
+    """Función principal que navega, comprueba el stock y notifica."""
+    print(f"[{TALLA_BUSCADA}] Iniciando comprobación de stock...")
+
+    async with async_playwright() as p:
+        # MODO DEPURACIÓN: Cambiar a 'headless=True' para el hosting.
+        browser = await p.chromium.launch(headless=False, slow_mo=500)
+        page = await browser.new_page()
+
+        try:
+            # 1. Navegación e interacciones iniciales
+            print("1. Navegando a la URL...")
+            await page.goto(PRODUCT_URL, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
+            await page.wait_for_timeout(2000)
+
+            # 2. Cookies
+            try:
+                print("2. Intentando aceptar cookies...")
+                await page.click(COOKIES_SELECTOR, timeout=5000)
+                print("   (Cookies aceptadas con éxito).")
+            except Exception:
+                pass
+
+            await page.wait_for_timeout(2000)
+
+            # 3. Clicar en "Añadir"
+            try:
+                print(f"3. Intentando pulsar el botón inicial 'Añadir'...")
+                await page.click(BUTTON_OPEN_SELECTOR, timeout=5000)
+                print("   (Botón 'Añadir' pulsado con éxito).")
+            except Exception as e:
+                print(f"   🛑 ERROR: No se pudo pulsar el botón 'Añadir'. Error: {e}")
+
+            await page.wait_for_timeout(2000)
+
+            # 4. Esperar que la talla esté visible
+            print(f"4. Esperando que la talla '{TALLA_BUSCADA}' esté visible (Máx {TIMEOUT_MS / 1000}s)...")
+
+            talla_element = page.locator(TALLA_SELECTOR).first
+            await talla_element.wait_for(state="visible", timeout=TIMEOUT_MS)
+
+            # 5. VERIFICACIÓN DE DISPONIBILIDAD (INTENTAR CLIC)
+            print("5. Verificando disponibilidad intentando hacer clic...")
+
+            # Intentamos hacer clic. Si el botón está agotado/gris/cubierto, Playwright fallará aquí.
+            # Aumentamos el timeout del clic por si acaso
+            await talla_element.click(timeout=3000)
+
+            # 6. ÉXITO (Si el código llega aquí, el clic fue exitoso -> ¡HAY STOCK!)
+            resultado = f"🎉 STOCK ENCONTRADO: ¡La talla '{TALLA_BUSCADA}' parece estar disponible! Revisa la web YA: {PRODUCT_URL}"
+            print(resultado)
+
+            send_email(
+                subject=f"[ALERTA ZARA] ¡Stock de talla {TALLA_BUSCADA} encontrado!",
+                body=resultado
+            )
+
+        # Capturamos el error de Playwright (TimeoutError, ElementNotVisibleError, etc.)
+        except PlaywrightError as e:
+            # Si el clic falla por intercepción, deshabilitado o timeout, asumimos agotado
+            resultado = f"❌ RESULTADO: La talla '{TALLA_BUSCADA}' sigue agotada (Clic bloqueado/Talla no seleccionable)."
+            print(resultado)
+
+        except Exception as e:
+            # Capturamos cualquier otro error
+            error_message = f"🛑 Ocurrió un error general: {e}"
+            print(error_message)
+
+        finally:
+            await page.wait_for_timeout(5000)
+            await browser.close()
+            print("Comprobación finalizada.")
+
+
+if __name__ == "__main__":
+    asyncio.run(check_zara_stock())
